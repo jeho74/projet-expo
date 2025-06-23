@@ -1,237 +1,240 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-    View, Text, TextInput, TouchableOpacity, StyleSheet,
-    Alert, ActivityIndicator, ScrollView, Platform
+  View, Text, FlatList, Button, TextInput, StyleSheet,
+  TouchableOpacity, Alert, ActivityIndicator
 } from 'react-native';
-import api from '../api/auth';
-import * as Network from 'expo-network';
-import { v4 as uuidv4 } from 'uuid';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Ionicons } from '@expo/vector-icons';
+import api from '../services/api';
 
+const STORAGE_KEY = 'local_deliveries_v2';
 
-const API_STOCK_MOVEMENT_URL = '/stock/movement';
+const DeliveryListScreen = () => {
+  const [deliveries, setDeliveries] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [selectedDelivery, setSelectedDelivery] = useState(null);
+  const [fullReturned, setFullReturned] = useState('');
+  const [consigned, setConsigned] = useState('');
 
-// --- COULEURS (DOIVENT CORRESPONDRE À VOTRE PALETTE GLOBALE) ---
-const Colors = {
-    primary: '#3b82f6', // Bleu
-    success: '#28a745', // Vert
-    warning: '#ffc107', // Jaune
-    danger: '#dc3545', // Rouge
-    info: '#17a2b8', // Cyan
-    background: '#f5f5f5',
-    cardBackground: '#fff',
-    textPrimary: '#343a40',
-    textSecondary: '#6c757d',
-    shadow: 'rgba(0,0,0,0.1)',
+  const getAuthHeaders = async () => {
+    const token = await AsyncStorage.getItem('authToken');
+    return { Authorization: `Bearer ${token}` };
+  };
+
+  const loadDeliveries = async () => {
+    const data = await AsyncStorage.getItem(STORAGE_KEY);
+    setDeliveries(data ? JSON.parse(data) : []);
+    setIsLoading(false);
+  };
+
+  useEffect(() => { loadDeliveries(); }, []);
+
+  const confirmCompletion = (delivery) => {
+    setSelectedDelivery(delivery);
+    setFullReturned('');
+    setConsigned('');
+    setModalVisible(true);
+  };
+
+  const finalizeDelivery = async () => {
+    if (!selectedDelivery) return;
+
+    const fullSent = selectedDelivery.fullBottlesSent;
+    const fullBack = parseInt(fullReturned);
+    const consignedSold = parseInt(consigned);
+    const emptyBack = fullSent - fullBack - consignedSold;
+
+    if (
+      isNaN(fullBack) || isNaN(consignedSold) ||
+      fullBack < 0 || consignedSold < 0 ||
+      emptyBack < 0 || fullBack > fullSent
+    ) {
+      return Alert.alert("Erreur", "Valeurs invalides ou incohérentes.");
+    }
+
+    try {
+      const headers = await getAuthHeaders();
+      const deliveryId = selectedDelivery._id || selectedDelivery.id;
+      let res;
+      try {
+        res = await api.patch(
+          `/deliveries/${deliveryId}`,
+          {
+            fullBottlesReturned: fullBack,
+            emptyBottlesReturned: emptyBack,
+            consignedBottles: consignedSold,
+            status: 'terminée'
+          },
+          { headers }
+        );
+      } catch {
+        res = null;
+      }
+
+      let updated;
+      if (res && res.data && res.data.livraison) {
+        const newData = res.data.livraison;
+        updated = deliveries.map(item =>
+          (item._id || item.id) === deliveryId
+            ? { ...item, ...newData, isSynced: true }
+            : item
+        );
+        Alert.alert("Succès", "Livraison finalisée sur le serveur.");
+      } else {
+        const fullSold = fullSent - fullBack;
+        updated = deliveries.map(item =>
+          (item._id || item.id) === deliveryId
+            ? {
+              ...item,
+              fullBottlesReturned: fullBack,
+              emptyBottlesReturned: emptyBack,
+              consignedBottles: consignedSold,
+              fullBottlesSold: fullSold,
+              status: 'terminée',
+              updatedAt: new Date().toISOString(),
+              isSynced: false
+            }
+            : item
+        );
+        Alert.alert("Succès", "Livraison finalisée localement (offline).");
+      }
+
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      setDeliveries(updated);
+      setModalVisible(false);
+    } catch (error) {
+      Alert.alert("Erreur", "Impossible de finaliser la livraison.");
+    }
+  };
+
+  const deleteDelivery = async (id) => {
+    const updated = deliveries.filter(item => (item._id || item.id) !== id);
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    setDeliveries(updated);
+  };
+
+  const renderItem = ({ item }) => (
+    <View style={styles.item}>
+      <Text style={styles.title}>{item.driverName || 'Chauffeur inconnu'}</Text>
+      <Text>Camion: {item.truckName} ({item.licensePlate})</Text>
+      <Text>Bouteilles envoyées: {item.fullBottlesSent}</Text>
+      <Text style={{ color: item.status === 'terminée' ? 'green' : '#000' }}>
+        Statut: {item.status}
+      </Text>
+      <View style={styles.actions}>
+        {item.status !== 'terminée' && (
+          <Button title="Terminer" onPress={() => confirmCompletion(item)} />
+        )}
+        <TouchableOpacity onPress={() => deleteDelivery(item._id || item.id)}>
+          <Text style={styles.delete}>🗑️ Supprimer</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
+  if (isLoading) {
+    return <ActivityIndicator size="large" />;
+  }
+
+  return (
+    <View style={styles.container}>
+      <Text style={styles.header}>📋 Livraisons ({deliveries.length})</Text>
+      <FlatList
+        data={deliveries}
+        keyExtractor={item => item._id ? item._id : item.id}
+        renderItem={renderItem}
+        ListEmptyComponent={<Text style={styles.emptyText}>Aucune livraison</Text>}
+        refreshing={isLoading}
+        onRefresh={loadDeliveries}
+      />
+      {modalVisible && selectedDelivery && (
+        <View style={styles.modal}>
+          <Text style={styles.modalTitle}>Finaliser Livraison</Text>
+          <TextInput
+            placeholder="Pleines retournées"
+            value={fullReturned}
+            onChangeText={setFullReturned}
+            keyboardType="numeric"
+            style={styles.input}
+          />
+          <TextInput
+            placeholder="Consignées vendues"
+            value={consigned}
+            onChangeText={setConsigned}
+            keyboardType="numeric"
+            style={styles.input}
+          />
+          {fullReturned && consigned && (
+            <Text style={{ textAlign: 'center', marginBottom: 10, color: '#555' }}>
+              Vides retournées estimées : {selectedDelivery.fullBottlesSent - parseInt(fullReturned || 0) - parseInt(consigned || 0)}
+            </Text>
+          )}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+            <Button title="Annuler" color="#888" onPress={() => setModalVisible(false)} />
+            <Button title="Valider" onPress={finalizeDelivery} />
+          </View>
+        </View>
+      )}
+    </View>
+  );
 };
 
-const STORAGE_KEY = 'local_deliveries_v2'; // Clé AsyncStorage partagée avec DeliveryManagerScreen
-
-export default function DeliveryFormScreen({ route, navigation }) {
-    const deliveryId = route.params?.deliveryId || null;
-    const existingData = route.params?.deliveryData || {};
-
-    const [driver, setDriver] = useState(existingData.driver?._id || '');
-    const [truck, setTruck] = useState(existingData.truck?._id || '');
-    const [fullBottlesSent, setFullBottlesSent] = useState(existingData.fullBottlesSent?.toString() || '');
-    const [emptyBottlesSent, setEmptyBottlesSent] = useState(existingData.emptyBottlesSent?.toString() || '');
-    const [fullBottlesReturned, setFullBottlesReturned] = useState(''); // Seulement pour la finalisation
-    const [consignedBottles, setConsignedBottles] = useState(''); // Seulement pour la finalisation
-    const [loading, setLoading] = useState(false);
-
-    const isEdit = !!deliveryId;
-    const isFinalizing = !!fullBottlesReturned; // Indique si on finalise (a des retours)
-
-    const handleSubmit = async () => {
-        if (!driver || !truck || !fullBottlesSent) { // Retirer emptyBottlesSent des champs requis
-            Alert.alert("Champs requis", "Merci de remplir tous les champs.");
-            return;
-        }
-
-        const fullSent = parseInt(fullBottlesSent);
-        const fullBack = parseInt(fullBottlesReturned || '0'); // Valeur par défaut 0
-        const consigned = parseInt(consignedBottles || '0'); // Valeur par défaut 0
-        const emptySent = parseInt(emptyBottlesSent || '0'); // Valeur par défaut 0
-
-        const fullSold = fullSent - fullBack;
-
-        if (fullSold < 0) {
-            Alert.alert("Erreur", "Le nombre de pleines retournées ne peut pas dépasser le nombre envoyé.");
-            return;
-        }
-
-        const localId = uuidv4(); // Générer un ID unique pour le suivi local
-
-        const deliveryPayload = {
-            localId: localId, // Inclure le localId
-            type: isFinalizing ? "retour_livraison" : "sortie_livraison",
-            productId: "bouteilles_gaz", // Remplacez par l'ID réel de votre produit
-            quantity: fullSent,
-            truck: truck,
-            driver: driver,
-            deliveryDate: new Date().toISOString(),
-            status: isFinalizing ? "terminée" : "en cours",
-            fullBottlesSent: fullSent,
-            emptyBottlesSent: emptySent,
-            fullBottlesReturned: fullBack, // Seulement si finalisation
-            consignedBottles: consigned, // Seulement si finalisation
-            fullBottlesSold: fullSold,      // Seulement si finalisation
-        };
-
-        try {
-            setLoading(true);
-            const status = await Network.getNetworkStateAsync();
-
-            if (!status.isConnected) {
-                // Si hors ligne, sauvegarder localement
-                const localDelivery = {
-                    ...deliveryPayload,
-                    id: localId, // Pour la liste locale
-                    isSynced: false,
-                    driverName: route.params?.deliveryData?.driver?.name || 'Inconnu',
-                    truckName: route.params?.deliveryData?.truck?.name || 'Inconnu',
-                    licensePlate: route.params?.deliveryData?.truck?.licensePlate || 'N/A',
-                };
-                await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify([localDelivery])); // Save as array
-                Alert.alert("Mode hors-ligne", "Livraison sauvegardée localement.");
-                navigation.goBack();
-                return;
-            }
-
-            // Envoi à l'API stock/movement
-            let res;
-            if (isEdit && isFinalizing) {
-                // Finalisation d'une livraison existante
-                 res = await api.patch(`${API_STOCK_MOVEMENT_URL}/${deliveryId}`, deliveryPayload);
-            } else if (isEdit) {
-                // Edition d'une livraison existante
-                 res = await api.patch(`${API_STOCK_MOVEMENT_URL}/${deliveryId}`, deliveryPayload);
-            } else {
-                // Création d'une nouvelle livraison
-                 res = await api.post(API_STOCK_MOVEMENT_URL, deliveryPayload);
-            }
-
-            Alert.alert("Succès", "Livraison enregistrée et stock mis à jour.");
-            navigation.goBack();
-
-
-        } catch (error) {
-            console.error("Erreur :", error);
-            Alert.alert("Erreur", "Échec de la soumission.");
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    return (
-        <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 20 }}>
-            <View style={styles.header}>
-                <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-                    <Ionicons name="arrow-back" size={24} color={Colors.primary} />
-                </TouchableOpacity>
-                <Text style={styles.title}>{isEdit ? "Modifier la livraison" : "Nouvelle livraison"}</Text>
-            </View>
-
-            <TextInput
-                placeholder="ID du chauffeur"
-                value={driver}
-                onChangeText={setDriver}
-                style={styles.input}
-                placeholderTextColor={Colors.textSecondary}
-            />
-            <TextInput
-                placeholder="ID du camion"
-                value={truck}
-                onChangeText={setTruck}
-                style={styles.input}
-                placeholderTextColor={Colors.textSecondary}
-            />
-            <TextInput
-                placeholder="Bouteilles pleines envoyées"
-                value={fullBottlesSent}
-                onChangeText={setFullBottlesSent}
-                keyboardType="numeric"
-                style={styles.input}
-                placeholderTextColor={Colors.textSecondary}
-            />
-             <TextInput
-                placeholder="Bouteilles vides envoyées"
-                value={emptyBottlesSent}
-                onChangeText={setEmptyBottlesSent}
-                keyboardType="numeric"
-                style={styles.input}
-                placeholderTextColor={Colors.textSecondary}
-            />
-            {isFinalizing && (
-                <>
-                    <TextInput
-                        placeholder="Bouteilles pleines retournées"
-                        value={fullBottlesReturned}
-                        onChangeText={setFullBottlesReturned}
-                        keyboardType="numeric"
-                        style={styles.input}
-                        placeholderTextColor={Colors.textSecondary}
-                    />
-                    <TextInput
-                        placeholder="Bouteilles consignées (vendues avec contenu)"
-                        value={consignedBottles}
-                        onChangeText={setConsignedBottles}
-                        keyboardType="numeric"
-                        style={styles.input}
-                        placeholderTextColor={Colors.textSecondary}
-                    />
-                </>
-            )}
-
-
-            <TouchableOpacity style={styles.button} onPress={handleSubmit} disabled={loading}>
-                {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>{isEdit ? (isFinalizing ? "Finaliser la livraison" : "Mettre à jour") : "Créer la livraison"}</Text>}
-            </TouchableOpacity>
-        </ScrollView>
-    );
-}
-
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: Colors.background,
-        padding: 20,
-    },
-    header: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 20,
-    },
-    backButton: {
-        marginRight: 10,
-    },
-    title: {
-        fontSize: 24,
-        fontWeight: 'bold',
-        color: Colors.textPrimary,
-        textAlign: 'center',
-        flex: 1,
-    },
-    input: {
-        backgroundColor: Colors.cardBackground,
-        padding: 15,
-        marginBottom: 15,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: '#ddd',
-        fontSize: 16,
-        color: Colors.textPrimary,
-    },
-    button: {
-        backgroundColor: Colors.primary,
-        padding: 18,
-        borderRadius: 10,
-        alignItems: 'center',
-    },
-    buttonText: {
-        color: '#fff',
-        fontWeight: 'bold',
-        fontSize: 18,
-    },
+  container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5' },
+  header: { fontSize: 20, fontWeight: 'bold', marginVertical: 15 },
+  item: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#ddd',
+    padding: 15,
+    borderRadius: 5,
+    marginBottom: 10
+  },
+  title: { fontWeight: 'bold', fontSize: 16, marginBottom: 5 },
+  delete: { color: 'red', marginTop: 8, textAlign: 'center', padding: 5 },
+  actions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+    paddingTop: 10
+  },
+  emptyText: {
+    textAlign: 'center',
+    marginTop: 20,
+    color: '#888',
+    fontSize: 16
+  },
+  modal: {
+    position: 'absolute',
+    top: '30%',
+    left: '5%',
+    right: '5%',
+    backgroundColor: '#fff',
+    padding: 20,
+    borderRadius: 10,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    textAlign: 'center'
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    backgroundColor: '#fff',
+    marginBottom: 15,
+    padding: 12,
+    borderRadius: 5,
+    fontSize: 16
+  },
 });
+
+export default DeliveryListScreen;

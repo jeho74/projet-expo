@@ -52,7 +52,8 @@ function GestionGridController() {
     { label: 'Salaires', screen: 'Salaires' },
     { label: 'Notifications', screen: 'Notifications' },
     { label: 'Camions', screen: 'Camions' },
-    { label: 'Livraisons', screen: 'Livraisons' },
+    { label: 'Ajout de livraison', screen: 'Livraisons' },
+    { label: 'Finalisation de livraison', screen: 'DeliveryForm' },
     
   ];
 
